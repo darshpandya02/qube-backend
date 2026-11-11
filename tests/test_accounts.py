@@ -291,3 +291,54 @@ def test_emergency_end_needs_own_device(client, world):
         headers=a.headers,
     )
     assert r.status_code == 404
+
+
+# --- account deletion ----------------------------------------------------------------------
+
+
+def _delete(client, token, password=PW):
+    return client.request("DELETE", "/me", json={"password": password}, headers=_auth(token))
+
+
+def test_individual_deletes_account_and_tags_are_freed(client):
+    token = _signup(client, email="gone@example.com").json()["access_token"]
+    device = _device(client, token)
+    uid = new_uid()
+    client.post("/me/tags/claim", json={"tap": _tap(uid, 1)}, headers=_auth(token))
+    client.post(
+        "/taps/verify",
+        json={"client_event_id": new_id(), "device_id": device, "tap": _tap(uid, 2)},
+        headers=_auth(token),
+    )
+    assert _delete(client, token, "wrong password").status_code == 401
+    r = _delete(client, token)
+    assert r.status_code == 200 and r.json() == {"deleted": "organization"}
+    # Signed out everywhere, can't log in, email reusable, tag claimable by someone else.
+    assert client.get("/me", headers=_auth(token)).status_code == 401
+    login = client.post("/auth/login", json={"email": "gone@example.com", "password": PW})
+    assert login.status_code == 401
+    other = _signup(client, email="gone@example.com").json()["access_token"]
+    claim = client.post("/me/tags/claim", json={"tap": _tap(uid, 3)}, headers=_auth(other))
+    assert claim.status_code == 201
+
+
+def test_member_deletes_account_org_survives(client, world):
+    world.db.save(Invite(code="DEL2345678", org_id=world.org.id))
+    r = client.post("/auth/join", json=join_body("DEL2345678"))
+    token = r.json()["access_token"]
+    assert _delete(client, token, MEMBER_PASSWORD).json() == {"deleted": "account"}
+    assert client.get("/admin/users", headers=world.admin_headers).status_code == 200
+    assert client.get("/me", headers=_auth(token)).status_code == 401
+
+
+def test_last_org_admin_with_members_cannot_delete(client):
+    admin = _signup(client, "organization", org_name="Lib").json()["access_token"]
+    code = client.post("/admin/invites", json={}, headers=_auth(admin)).json()["code"]
+    client.post("/auth/join", json=join_body(code))
+    r = _delete(client, admin)
+    assert r.status_code == 409 and r.json()["detail"] == "last_admin"
+
+
+def test_sole_org_admin_deletes_whole_org(client):
+    admin = _signup(client, "organization", org_name="Solo").json()["access_token"]
+    assert _delete(client, admin).json() == {"deleted": "organization"}

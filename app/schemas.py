@@ -232,6 +232,10 @@ class ClaimTagRequest(BaseModel):
     zone_id: int | None = None
 
 
+class DeleteAccountRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
 class EmergencyEndRequest(BaseModel):
     client_event_id: str = Field(min_length=8, max_length=64)
     device_id: int

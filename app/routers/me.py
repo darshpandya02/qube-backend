@@ -6,6 +6,7 @@ from app.db import get_db
 from app.models import Organization, Tag, User, Zone, utcnow
 from app.schemas import (
     ClaimTagRequest,
+    DeleteAccountRequest,
     MeResponse,
     MyTag,
     MyTagsResponse,
@@ -14,7 +15,8 @@ from app.schemas import (
     StateResponse,
     UserOut,
 )
-from app.security import current_user, get_settings_dep, require_admin
+from app.security import current_user, get_settings_dep, require_admin, verify_password
+from app.services.accounts import DeleteError, delete_account
 from app.services.policy import policy_out
 from app.services.sessions import active_session_out, current_active_session, zone_rules
 from app.services.taps import ClaimError, claim_tag
@@ -91,3 +93,19 @@ def claim(
     db.refresh(tag)
     response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return MyTag.model_validate(tag)
+
+
+@router.delete("", status_code=status.HTTP_200_OK)
+def delete_me(
+    body: DeleteAccountRequest, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """Permanently delete the signed-in account and its personal data (re-enter the password).
+    Individuals' personal orgs are deleted entirely; see services/accounts.py for org rules."""
+    if not verify_password(user.password_hash, body.password):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials")
+    try:
+        deleted = delete_account(db, user)
+    except DeleteError as e:
+        raise HTTPException(e.status_code, detail=e.detail) from e
+    db.commit()
+    return {"deleted": deleted}
