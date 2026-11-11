@@ -8,10 +8,21 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
 
-from app.models import EndReason, Platform, Role, TagRole, Verification
+from app.models import EndReason, OrgKind, Platform, PolicyMode, Role, TagRole, Verification
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _UID = re.compile(r"^[0-9A-F]{14}$")
+_ANDROID_PACKAGE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
+
+Password = Annotated[str, Field(min_length=8, max_length=256)]
+
+
+def _check_timezone(v: str) -> str:
+    try:
+        ZoneInfo(v)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ValueError(f"unknown timezone {v!r}") from e
+    return v
 
 
 # Serialize timestamps as UTC with an explicit "Z" so clients don't read them as local time.
@@ -34,9 +45,12 @@ class Out(BaseModel):
 
 
 class JoinRequest(BaseModel):
+    """Join an organization with an invite code, creating a member account."""
+
     code: str = Field(min_length=4, max_length=64)
     name: str | None = Field(default=None, max_length=120)
-    email: EmailStr | None = None
+    email: EmailStr
+    password: Password
 
     @field_validator("code")
     @classmethod
@@ -47,6 +61,24 @@ class JoinRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+
+
+class LoginRequest(AdminLoginRequest):
+    """Any account: individual, organization admin, or member."""
+
+
+class SignupRequest(BaseModel):
+    account_type: Literal["individual", "organization"]
+    email: EmailStr
+    password: Password
+    name: str | None = Field(default=None, max_length=120)
+    org_name: str | None = Field(default=None, min_length=1, max_length=120)
+    timezone: str = "UTC"
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        return _check_timezone(v)
 
 
 class UserOut(Out):
@@ -63,12 +95,14 @@ class OrgOut(Out):
     id: int
     name: str
     timezone: str
+    kind: OrgKind
 
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+    organization: OrgOut | None = None
 
 
 class MeResponse(BaseModel):
@@ -189,6 +223,49 @@ class MyTagsResponse(BaseModel):
     zones: list[ZoneRules]
 
 
+class ClaimTagRequest(BaseModel):
+    """Register a new tag to the caller's org by tapping it. Admins only (an individual is the
+    admin of their personal org)."""
+
+    tap: TapPayload
+    role: TagRole = TagRole.toggle
+    zone_id: int | None = None
+
+
+class EmergencyEndRequest(BaseModel):
+    client_event_id: str = Field(min_length=8, max_length=64)
+    device_id: int
+
+
+# --- lock policy ---------------------------------------------------------------------------
+
+
+class PolicyApp(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    android_package: str | None = Field(default=None, max_length=255)
+
+    @field_validator("android_package")
+    @classmethod
+    def _pkg(cls, v: str | None) -> str | None:
+        if v is not None and not _ANDROID_PACKAGE.match(v):
+            raise ValueError("android_package must look like com.example.app")
+        return v
+
+
+class PolicyUpdate(BaseModel):
+    mode: PolicyMode
+    apps: list[PolicyApp] = Field(default_factory=list, max_length=200)
+
+
+class PolicyOut(BaseModel):
+    # False for personal accounts: the device owner picks apps locally, the server has no list.
+    managed: bool
+    mode: PolicyMode
+    apps: list[PolicyApp]
+    version: int
+    updated_at: UtcDatetime | None = None
+
+
 # --- admin ---------------------------------------------------------------------------------
 
 
@@ -302,11 +379,7 @@ class OrgCreate(BaseModel):
     @field_validator("timezone")
     @classmethod
     def _tz(cls, v: str) -> str:
-        try:
-            ZoneInfo(v)
-        except (ZoneInfoNotFoundError, ValueError) as e:
-            raise ValueError(f"unknown timezone {v!r}") from e
-        return v
+        return _check_timezone(v)
 
 
 SyncResponse.model_rebuild()
