@@ -6,7 +6,15 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 from app.models import EndReason, OrgKind, Platform, PolicyMode, Role, TagRole, Verification
 
@@ -129,10 +137,33 @@ class DeviceOut(Out):
 
 
 class TapPayload(BaseModel):
-    """The SUN parameters from the tag URL."""
+    """A tap: either the SUN parameters from an NTAG 424 DNA tag URL (picc_data + cmac), or,
+    only when the server sets allow_plain_tags, the chip UID of a plain NTAG21x tag."""
 
-    picc_data: str = Field(min_length=32, max_length=32)
-    cmac: str = Field(min_length=16, max_length=16)
+    picc_data: str | None = Field(default=None, min_length=32, max_length=32)
+    cmac: str | None = Field(default=None, min_length=16, max_length=16)
+    uid: str | None = None
+
+    @field_validator("uid")
+    @classmethod
+    def _uid(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.replace(":", "").replace(" ", "").upper()
+        if not _UID.match(v):
+            raise ValueError("uid must be 7 bytes of hex")
+        return v
+
+    @model_validator(mode="after")
+    def _one_kind(self):
+        sun = self.picc_data is not None and self.cmac is not None
+        if sun == (self.uid is not None) or (self.picc_data is None) != (self.cmac is None):
+            raise ValueError("send either picc_data + cmac, or uid")
+        return self
+
+    @property
+    def is_plain(self) -> bool:
+        return self.uid is not None
 
 
 class ZoneRules(BaseModel):

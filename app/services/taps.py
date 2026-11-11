@@ -59,6 +59,8 @@ def _consume_counter(db: Session, tag: Tag, counter: int, now: datetime) -> bool
 def check_tap(
     db: Session, settings: Settings, user: User, tap: TapPayload, *, online: bool, now: datetime
 ) -> TapCheck:
+    if tap.is_plain:
+        return _check_plain_tap(db, settings, user, tap)
     try:
         sun = verify_tap(settings.master_key_bytes, tap.picc_data, tap.cmac)
     except SunError:
@@ -77,6 +79,24 @@ def check_tap(
         return TapCheck(sun=sun, tag=tag, reason="replayed_tap")
     if not _consume_counter(db, tag, sun.counter, now):
         return TapCheck(sun=sun, tag=tag, reason="replayed_tap")
+    return TapCheck(sun=sun, tag=tag)
+
+
+def _check_plain_tap(db: Session, settings: Settings, user: User, tap: TapPayload) -> TapCheck:
+    """TEMPORARY (NTAG215): identify the tag by UID only. No signature, no replay check."""
+    if not settings.allow_plain_tags:
+        return TapCheck(reason="plain_tags_disabled")
+    sun = SunTap(uid=tap.uid, counter=-1)
+    tag = db.get(Tag, tap.uid)
+    if tag is None:
+        return TapCheck(sun=sun, reason="unknown_tag")
+    if tag.org_id != user.org_id:
+        return TapCheck(reason="wrong_org")
+    zone = db.get(Zone, tag.zone_id)
+    if not tag.active or zone.archived:
+        return TapCheck(sun=sun, tag=tag, reason="inactive_tag")
+    tag.last_seen_at = utcnow()
+    db.add(tag)
     return TapCheck(sun=sun, tag=tag)
 
 
@@ -132,7 +152,7 @@ def process_online_tap(
         occurred_at=now,
         received_at=now,
         tag_uid=check.sun.uid if check.sun else None,
-        tag_counter=check.sun.counter if check.sun else None,
+        tag_counter=check.sun.counter if check.sun and check.sun.counter >= 0 else None,
     )
 
     if check.reason:
@@ -299,7 +319,7 @@ def _apply_sync_event(
         verification=verification,
         reject_reason=check.reason,
         tag_uid=check.sun.uid if check.sun else None,
-        tag_counter=check.sun.counter if check.sun else None,
+        tag_counter=check.sun.counter if check.sun and check.sun.counter >= 0 else None,
     )
 
     if ev.type == "start":
@@ -388,10 +408,15 @@ def claim_tag(
 
     Ownership is by possession: whoever first taps a fresh Qube tag while signed in as an admin
     owns it. The claim tap's counter is consumed so the same URL can't then start a session."""
-    try:
-        sun = verify_tap(settings.master_key_bytes, tap.picc_data, tap.cmac)
-    except SunError as e:
-        raise ClaimError(400, "invalid_signature") from e
+    if tap.is_plain:
+        if not settings.allow_plain_tags:
+            raise ClaimError(400, "plain_tags_disabled")
+        sun = SunTap(uid=tap.uid, counter=-1)
+    else:
+        try:
+            sun = verify_tap(settings.master_key_bytes, tap.picc_data, tap.cmac)
+        except SunError as e:
+            raise ClaimError(400, "invalid_signature") from e
 
     now = utcnow()
     existing = db.get(Tag, sun.uid)
@@ -416,7 +441,8 @@ def claim_tag(
     tag = Tag(uid=sun.uid, org_id=user.org_id, zone_id=zone.id, role=role)
     db.add(tag)
     db.flush()
-    _consume_counter(db, tag, sun.counter, now)
+    if not tap.is_plain:
+        _consume_counter(db, tag, sun.counter, now)
     return tag, True
 
 
